@@ -89,6 +89,99 @@ The `{env:DISCORD_TOKEN}` placeholder is resolved from the environment opencode 
 }
 ```
 
+## Run as a local HTTP server
+
+By default your MCP client spawns this server on stdio. You can instead run it once as a
+long-lived process and connect clients to it over HTTP:
+
+```sh
+bun run start:http
+```
+
+It prints the endpoint, plus a freshly generated bearer token when you did not supply one:
+
+```
+discord-user-connector MCP listening on http://127.0.0.1:8787/mcp
+auth: generated bearer token -> 4f8c1e2a-...
+      set MCP_HTTP_TOKEN to keep it stable across restarts
+```
+
+### Environment
+
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `MCP_HTTP` | unset | `1` runs HTTP instead of stdio |
+| `MCP_PORT` | `8787` | Port to listen on, in HTTP mode |
+| `MCP_HOST` | `127.0.0.1` | Bind address. Anything else warns loudly on stderr |
+| `MCP_HTTP_TOKEN` | generated | Bearer token clients must send |
+| `DISCORD_TOKEN` | — | still required |
+| `DISCORD_MCP_WRITE` | unset | still gates the write tools |
+
+`MCP_HTTP=1 bun run start` does the same thing, but the `VAR=value command` prefix only works
+in bash/zsh — use `bun run start:http` on Windows.
+
+HTTP mode starts only when you ask for it, with `--http` or `MCP_HTTP=1`. `MCP_PORT` and
+`MCP_HOST` are read only once HTTP mode is on, so setting them can never push an existing
+stdio client over to HTTP by accident.
+
+The server also exposes `GET /health`, which returns `{"status":"ok","sessions":<n>}`.
+
+### Client setup
+
+For [opencode](https://opencode.ai), in `~/.config/opencode/opencode.json`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "discord": {
+      "type": "remote",
+      "url": "http://127.0.0.1:8787/mcp",
+      "enabled": true,
+      "oauth": false,
+      "timeout": 600000,
+      "headers": {
+        "Authorization": "Bearer {env:MCP_HTTP_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+`oauth` must be `false`: opencode starts an OAuth flow when it sees a `401`, and this server
+uses a static bearer token instead. Bump `timeout` from its 5s default too — `export_messages`
+and `list_members` routinely take longer.
+
+### Security
+
+In stdio mode the server is private to the process that spawned it. Over HTTP that stops being
+true: anything that can reach the port can read your messages and DMs, and with
+`DISCORD_MCP_WRITE=1` can send and delete messages as you. Three things keep that contained,
+and all three assume you leave the defaults alone:
+
+- **The bind address.** `127.0.0.1` only. Setting `MCP_HOST=0.0.0.0` exposes your Discord
+  account to your entire network — the server warns on stderr when you do this.
+- **The bearer token.** Required on every request; compared in constant time. An unset
+  `MCP_HTTP_TOKEN` is generated rather than skipped, so the endpoint is never unauthenticated.
+- **Origin validation.** Requests carrying an `Origin` header that is not loopback are
+  rejected with `403`, which stops a malicious website from POSTing to your localhost. No CORS
+  headers are sent, so browsers cannot read responses either.
+
+Anyone with local code execution can still reach the port — treat the token like the Discord
+token itself.
+
+### Sanity check
+
+```sh
+curl -i http://127.0.0.1:8787/mcp -H "Authorization: Bearer $MCP_HTTP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
+
+A `200` with an `mcp-session-id` response header means it is working. Expect `401` without the
+header, and `403` if you add a non-loopback `Origin`.
+
 ## Development
 
 ```sh
